@@ -1,0 +1,145 @@
+"""
+FastAPI application entry point.
+Initializes the app with CORS configuration and authentication routes.
+"""
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+from .core.config import settings
+from .core.database import init_db, close_db
+from .core.errors import AppException
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager for startup and shutdown events.
+    """
+    # Startup: Initialize database
+    print("\n" + "="*80)
+    print("[START] Starting FastAPI Authentication Backend")
+    print("="*80)
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"[ERROR] Database initialization failed: {str(e)}")
+        raise
+    print("="*80 + "\n")
+
+    yield
+
+    # Shutdown: Close database connections
+    print("\n" + "="*80)
+    print("[STOP] Shutting down FastAPI Backend")
+    print("="*80)
+    try:
+        await close_db()
+    except Exception as e:
+        print(f"[WARN] Database shutdown error: {str(e)}")
+    print("="*80 + "\n")
+
+
+# Create FastAPI application
+app = FastAPI(
+    title="Authentication API",
+    description="Secure REST API for user authentication with JWT",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Global exception handlers
+
+@app.exception_handler(AppException)
+async def app_exception_handler(request: Request, exc: AppException):
+    """
+    Handle custom AppException with structured error response.
+    """
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error_code": exc.error_code,
+            "message": exc.message,
+            "details": exc.details if exc.details else None
+        }
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Handle Pydantic validation errors with structured error response.
+    """
+    details = []
+    for error in exc.errors():
+        field = '.'.join(str(loc) for loc in error['loc'] if loc != 'body')
+        details.append({
+            "field": field,
+            "message": error['msg']
+        })
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error_code": "VALIDATION_ERROR",
+            "message": "Invalid input data",
+            "details": details
+        }
+    )
+
+
+# Root endpoint
+@app.get("/")
+async def root():
+    """Root endpoint for API information."""
+    return {
+        "message": "Authentication API",
+        "status": "running",
+        "version": "1.0.0",
+        "docs": "/docs"
+    }
+
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint.
+    Returns 200 OK when healthy.
+    """
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+# Import and register authentication router
+from .api.routes import auth
+
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+
+
+# Startup message
+@app.on_event("startup")
+async def startup_message():
+    """Print startup information."""
+    print("[OK] FastAPI application started successfully")
+    print("[INFO] API Documentation: http://127.0.0.1:8001/docs")
+    print("[INFO] Health Check: http://127.0.0.1:8001/health")
+    print("[INFO] Authentication endpoints:")
+    print("       POST /api/auth/signup")
+    print("       POST /api/auth/signin")
+    print("       GET  /api/auth/me")
